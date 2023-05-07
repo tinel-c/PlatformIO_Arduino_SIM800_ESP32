@@ -21,11 +21,11 @@ The software covers also receival for SMS. To use that it uses a branch from the
 Base idea is to link the board to a MQTT server and use the connection to send and receive sms through the mqtt protocol.
 The following mqtt paths are used:
 
-![Image for the mqtt structure](https://photos.app.goo.gl/ztwyrFvmVzqd2b8u5)
+![Image for the mqtt structure](https://ibb.co/xq9WRdx)
 
 To send a sms:
-# set esp32SMS/smsSend/to the number that you are sending the sms to
-# set esp32SMS/smsSend/text the text that you want to send it to
+* set esp32SMS/smsSend/to the number that you are sending the sms to
+* set esp32SMS/smsSend/text the text that you want to send it to
 
 All the sms are received into:
 * esp32SMS/smsReceive/from the number that sent the sms
