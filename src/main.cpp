@@ -8,12 +8,15 @@ Enclosure conditions test via TCALL SIM800 & BME280
 #define TINY_GSM_RX_BUFFER 1024 // Set RX buffer to 1Kb
 //#define DUMP_AT_COMMANDS
 
+#include <WiFi.h>
 #include "TinyGsmClient.h"
 #include "ThingsBoard.h"
 #include "SparkFunBME280.h"
 #include "utilities.h"
 #include "driver/adc.h"
 #include <esp_wifi.h>
+#include <time.h>
+#include "passwords.h"
 
 #define uS_TO_S_FACTOR 1000000 /* Conversion factor for micro seconds to seconds */
 #define TIME_TO_SLEEP 40       /* Time ESP32 will go to sleep (in seconds) */
@@ -77,34 +80,22 @@ ThingsBoard tb(client);
 // Set to true, if modem is connected
 bool modemConnected = false;
 
-void print_wakeup_reason()
-{
-  esp_sleep_wakeup_cause_t wakeup_reason;
+//SMS Intitalization
+String smsText = "Init";
+bool smsReceived = 0;
+bool smsSent = 1;
 
-  wakeup_reason = esp_sleep_get_wakeup_cause();
+// NTP client for date and time
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 0;
+const int   daylightOffset_sec = 3600;
 
-  switch (wakeup_reason)
-  {
-  case ESP_SLEEP_WAKEUP_EXT0:
-    Serial.println("Wakeup caused by external signal using RTC_IO");
-    break;
-  case ESP_SLEEP_WAKEUP_EXT1:
-    Serial.println("Wakeup caused by external signal using RTC_CNTL");
-    break;
-  case ESP_SLEEP_WAKEUP_TIMER:
-    Serial.println("Wakeup caused by timer");
-    break;
-  case ESP_SLEEP_WAKEUP_TOUCHPAD:
-    Serial.println("Wakeup caused by touchpad");
-    break;
-  case ESP_SLEEP_WAKEUP_ULP:
-    Serial.println("Wakeup caused by ULP program");
-    break;
-  default:
-    Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
-    break;
-  }
-}
+
+WiFiClient espClient;
+PubSubClient pubClient(espClient);
+long lastMsg = 0;
+char msg[50];
+int value = 0;
 
 void GSM_ON(uint32_t time_delay)
 {
@@ -141,100 +132,192 @@ void GSM_OFF()
   digitalWrite(MODEM_RST, HIGH);     // Keep IRQ high ? (or not to save power?)
 }
 
-void PowerManagment(uint32_t time_delay)
-{
+void printLocalTime(){
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+  Serial.print("Day of week: ");
+  Serial.println(&timeinfo, "%A");
+  Serial.print("Month: ");
+  Serial.println(&timeinfo, "%B");
+  Serial.print("Day of Month: ");
+  Serial.println(&timeinfo, "%d");
+  Serial.print("Year: ");
+  Serial.println(&timeinfo, "%Y");
+  Serial.print("Hour: ");
+  Serial.println(&timeinfo, "%H");
+  Serial.print("Hour (12 hour format): ");
+  Serial.println(&timeinfo, "%I");
+  Serial.print("Minute: ");
+  Serial.println(&timeinfo, "%M");
+  Serial.print("Second: ");
+  Serial.println(&timeinfo, "%S");
 
-  Wire.begin(I2C_SDA, I2C_SCL);
-  delay(100);
-  bool isOk = setPowerBoostKeepOn(true); // Disables auto-standby, to keep 5V high during ESP32 sleep after 32Sec
-
-  // Set console baud rate
-  Serial.begin(SERIAL_DEBUG_BAUD);
-  Serial.println(F("Started"));
-  Serial.println(String("IP5306 setPowerBoostKeepOn: ") + (isOk ? "OK" : "FAIL"));
-  Serial.println(String("IP5306 Battery level:") + getBatteryLevel());
-  getBatteryFromADC();
+  Serial.println("Time variables");
+  char timeHour[3];
+  strftime(timeHour,3, "%H", &timeinfo);
+  Serial.println(timeHour);
+  char timeWeekDay[10];
+  strftime(timeWeekDay,10, "%A", &timeinfo);
+  Serial.println(timeWeekDay);
+  Serial.println();
+  char currentTime[50];
+  strftime(currentTime,50, "%A, %B %d %Y %H:%M:%S", &timeinfo);
+  pubClient.publish("esp32SMS/Status", currentTime);
+  if(smsReceived == 1) pubClient.publish("esp32SMS/smsReceive/timestamp", currentTime);
+  if(smsSent == 1) pubClient.publish("esp32SMS/smsSend/timestamp", currentTime);
+  smsReceived = 0;
+  smsSent = 0;
 }
+
+
+
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void mqttCallback(char* topic, byte* message, unsigned int length) {
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+  String topicSmsNo = "esp32SMS/smsSend/to";
+  String topicSmsText = "esp32SMS/smsSend/text";
+
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+  if(topicSmsNo.compareTo(topic) == 0)
+  {
+    Serial.println("New number received on MQTT: " + messageTemp);
+    smsNumber = messageTemp;
+    smsSent = 1;
+    printLocalTime();
+  }
+
+  if(topicSmsText.compareTo(topic) == 0)
+  {
+    Serial.println("New text received on MQTT: " + messageTemp);
+    Serial.println(modem.sendSMS(String(smsNumber),messageTemp));
+    smsSent = 1;
+    printLocalTime();
+  }
+  // Feel free to add more if statements to control more GPIOs with MQTT
+  
+
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!pubClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (pubClient.connect("ESP32Client")) {
+      Serial.println("connected");
+      // Subscribe
+      pubClient.subscribe("esp32SMS/smsSend/to");
+      Serial.println("Subscribed to: esp32SMS/smsSend/to");
+      pubClient.subscribe("esp32SMS/smsSend/text");
+      Serial.println("Subscribed to: esp32SMS/smsSend/text");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(pubClient.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
 
 void setup()
 {
 
   Serial.begin(115200);
-  //Increment boot number and print it every reboot
-  ++bootCount;
-  Serial.println("Boot number: " + String(bootCount));
 
-  //Print the wakeup reason for ESP32
-  print_wakeup_reason();
-
-  /*
-  First we configure the wake up source
-  We set our ESP32 to wake up every 5 seconds
-  */
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-  Serial.println("Setup ESP32 to sleep for " + String(TIME_TO_SLEEP) +
-                 " Seconds");
-
-  PowerManagment(100);
-
-  if (bootCount == 1)
-  {
-    Serial.println("Going to sleep now, will skip GSM this time to confirm wake after 32s");
-    esp_deep_sleep_start();
+  setup_wifi();
+  pubClient.setServer(mqtt_server, 1883);
+  pubClient.setCallback(mqttCallback);
+  // Loop until we're reconnected
+  while (!pubClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (pubClient.connect("ESP32Client")) {
+      Serial.println("connected");
+      // Subscribe
+      pubClient.subscribe("esp32SMS/smsSend/to");
+      Serial.println("Subscribed to: esp32SMS/smsSend/to");
+      pubClient.subscribe("esp32SMS/smsSend/text");
+      Serial.println("Subscribed to: esp32SMS/smsSend/text");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(pubClient.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
   }
-}
+  Serial.println("WiFi connected!");
 
-void loop()
-{
-  Serial.println("In loop");
   GSM_ON(1000);
 
   // Set GSM module baud rate and UART pins
   SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
-  delay(3000);
 
-  String modemInfo = modem.getModemInfo();
-  Serial.print(F("Modem: "));
-  Serial.println(modemInfo);
+  // Init and get the time
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  printLocalTime();
+}
 
-  isEnvSensor = true;
-  mySensor.setI2CAddress(0x76); //purple modules are at 0x76, default 0x77
-  if (mySensor.beginI2C() == false)
-  { //Begin communication over I2C
-    Serial.println("The sensor did not respond. Please check wiring.");
-    isEnvSensor = false;
+void loop()
+{
+  if (!pubClient.connected()) {
+    reconnect();
+    Serial.println("WiFi connected!");
+  }
+  char bootCountString[8];
+  bootCount++;
+ 
+  pubClient.loop();
+  int index=modem.newMessageIndex(0);
+  if(index>0){
+    String SMS=modem.readSMS(index);
+    String ID=modem.getSenderID(index);
+    Serial.println("new message arrived from :");
+    pubClient.publish("esp32SMS/smsReceive/from", ID.c_str());
+    Serial.println(ID);
+    Serial.println("Says");
+    Serial.println(SMS);
+    pubClient.publish("esp32SMS/smsReceive/text", SMS.c_str());
+    smsReceived = 1;
+    printLocalTime();
   }
 
-  if (isEnvSensor)
-  {
-    Serial.print("Humidity: ");
-    Serial.print(mySensor.readFloatHumidity(), 0);
-
-    Serial.print(" Pressure: ");
-    Serial.print(mySensor.readFloatPressure(), 0);
-
-    Serial.print(" Alt: ");
-    //Serial.print(mySensor.readFloatAltitudeMeters(), 1);
-    Serial.print(mySensor.readFloatAltitudeFeet(), 1);
-
-    Serial.print(" Temp: ");
-    Serial.println(mySensor.readTempC(), 1);
-  }
-  Serial.print("GSM Battery: ");
-  Serial.print(modem.getBattPercent());
-  Serial.print("%   ");
-  Serial.print(modem.getBattVoltage());
-  Serial.println("mV");
-
-  Serial.println(String("IP5306 Battery level:") + getBatteryLevel());
-  getBatteryFromADC();
-
-  delay(1000);
-
-  if (!modemConnected)
+ /*  if (!modemConnected)
   {
     Serial.print(F("Waiting for network..."));
-    if (!modem.waitForNetwork(240000L))
+    if (!modem.waitForNetwork(2400L))
     {
       Serial.println(" fail");
       shutdown();
@@ -252,59 +335,11 @@ void loop()
       shutdown();
     }
 
-    Serial.println(modem.sendSMS(String("0740244845"),String("test") + modem.getIMEI()));
+    
 
     modemConnected = true;
     Serial.println(" OK");
-  }
-
-  if (!tb.connected())
-  {
-    // Connect to the ThingsBoard
-    Serial.print("Connecting to: ");
-    Serial.print(THINGSBOARD_SERVER);
-    Serial.print(" with token ");
-    Serial.println(TOKEN);
-    if (!tb.connect(THINGSBOARD_SERVER, TOKEN))
-    {
-      Serial.println("Failed to connect");
-      shutdown();
-    }
-  }
-
-  Serial.println("Sending data...");
-
-  // Uploads new telemetry to ThingsBoard using MQTT.
-  // See https://thingsboard.io/docs/reference/mqtt-api/#telemetry-upload-api
-  // for more details
-
-  if (tb.sendAttributeInt("bootCount", bootCount))
-    Serial.println("send bootCount");
-
-  if (isEnvSensor)
-  {
-    if (tb.sendTelemetryInt("d_temp", mySensor.readTempC()))
-      Serial.println("send d_temp");
-
-    if (tb.sendTelemetryInt("d_hum", (int)mySensor.readFloatHumidity()))
-      Serial.println("d_hum");
-
-    if (tb.sendTelemetryInt("d_pres", (int)mySensor.readFloatPressure()))
-      Serial.println("d_press");
-  }
-
-  if (tb.sendTelemetryInt("d_bat_p", getBatteryLevel()))
-    Serial.println("d_bat_p");
-
-  if (tb.sendTelemetryInt("d_bat_mv", bat_mv))
-    Serial.println("d_bat_mv");
-
-  if (tb.sendTelemetryInt("d_gsm_rssi", modem.getSignalQuality())) //CSQ need to convert to RSSI
-    Serial.println("d_gsm_rssi");
-
-  delay(10000); //GSM post seems aynchronous?, need to give it some time
-
-  shutdown();
+  } */
 }
 
 void shutdown()
@@ -318,26 +353,5 @@ void shutdown()
 
   Serial.println("GSM power off");
   GSM_OFF();
-
-  // adc_power_off(); //soposed to save power ?
-
-  Serial.println("Going to sleep now");
-  Serial.flush();
-  esp_deep_sleep_start();
 }
 
-void getBatteryFromADC()
-{
-  bat_mv = 0;
-  uint32_t oversample = 0;
-  for (size_t i = 0; i < 100; i++)
-  {
-    oversample += (uint32_t)analogRead(ADC_BAT);
-  }
-  bat_mv = (int)oversample / 100;
-  bat_mv = ((float)bat_mv / 4096) * 3600 * 2;
-
-  Serial.print("Battery from ADC: ");
-  Serial.print(bat_mv);
-  Serial.println("mV");
-}
