@@ -288,6 +288,13 @@ void setup()
   // Init and get the time
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   printLocalTime();
+  // Empty sms buffer
+  while(modem.emptySMSBuffer() == 0)
+  {
+    Serial.println("Wait for the SMS buffer to empty!");
+    delay(1000);
+  }
+   
 }
 
 void loop()
@@ -312,6 +319,11 @@ void loop()
     pubClient.publish("esp32SMS/smsReceive/text", SMS.c_str());
     smsReceived = 1;
     printLocalTime();
+    while(modem.emptySMSBuffer() == 0)
+    {
+      Serial.println("Wait for the SMS buffer to empty!");
+      delay(1000);
+    }
   }
 
  /*  if (!modemConnected)
